@@ -1,0 +1,63 @@
+{
+    "name": "@batchfy/node-git-server",
+    "version": "1.0.0",
+    "description": "A configurable git server written in Node.js",
+    "author": "Batchfy LLC <batchfy@gmail.com>",
+    "license": "MIT",
+    "type": "module",
+    "engines": {
+        "node": ">=22"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist"
+    ],
+    "bugs": {
+        "url": "https://github.com/batchfy/node-git-server/issues"
+    },
+    "homepage": "https://github.com/batchfy/node-git-server#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/batchfy/node-git-server.git"
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.build.json",
+        "typecheck": "tsc --noEmit",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "coverage": "vitest run --coverage",
+        "prepare": "husky && npm run build",
+        "prepublishOnly": "npm run build",
+        "nuc": "npm-check-updates"
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "@types/node": "^26.1.1",
+        "@vitest/coverage-v8": "^4.1.10",
+        "eslint": "^10.7.0",
+        "eslint-config-prettier": "^10.1.8",
+        "husky": "^9.1.7",
+        "prettier": "^3.9.5",
+        "typescript": "~6.0.3",
+        "typescript-eslint": "^8.63.0",
+        "vitest": "^4.1.10"
+    },
+    "volta": {
+        "node": "22.13.0"
+    },
+    "publishConfig": {
+        "access": "public"
+    }
+}
