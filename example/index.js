@@ -22,7 +22,23 @@ const { Git: Server } = require('../');
 
 const port = process.env.PORT || 7005;
 
-const repos = new Server(path.normalize(path.resolve(__dirname, 'tmp')), {
+async function repoDir(input_repo) {
+  
+  console.log(`repoDir ===== ${input_repo}`)
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      console.log(`timeout ===== ${input_repo}`)
+      if (! input_repo) {
+        resolve()
+      }
+  
+      resolve(input_repo);
+    }, 1000* 1)
+    
+  })
+}
+
+const repos = new Server(repoDir, {
   autoCreate: true,
   authenticate: ({ type, repo, user, headers }, next) => {
     console.log(type, repo, headers); // eslint-disable-line
@@ -44,16 +60,6 @@ const repos = new Server(path.normalize(path.resolve(__dirname, 'tmp')), {
 
 repos.on('push', (push) => {
   console.log(`push ${push.repo} / ${push.commit} ( ${push.branch} )`); // eslint-disable-line
-
-  repos.list((err, results) => {
-    push.log(' ');
-    push.log('Hey!');
-    push.log('Checkout these other repos:');
-    for (const repo of results) {
-      push.log(`- ${repo}`);
-    }
-    push.log(' ');
-  });
 
   push.accept();
 });
@@ -77,12 +83,6 @@ repos.listen(
         `failed to start git-server because of error ${error}`
       ); // eslint-disable-line
     console.log(`node-git-server running at ${type}://localhost:${port}`); // eslint-disable-line
-    repos.list((err, result) => {
-      if (!result) {
-        console.log('No repositories available...'); // eslint-disable-line
-      } else {
-        console.log(result); // eslint-disable-line
-      }
-    });
+    
   }
 );

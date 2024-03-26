@@ -29,7 +29,7 @@ export interface GitOptions {
   autoCreate?: boolean;
   authenticate?: (
     options: GitAuthenticateOptions,
-    callback: (error?: Error) => void | undefined
+    callback: (error?: Error) => Promise<void> | undefined
   ) => void | Promise<Error | undefined | void> | undefined;
   checkout?: boolean;
 }
@@ -145,12 +145,12 @@ export interface GitEvents {
   on(event: 'head', listener: (head: HeadData) => void): this;
 }
 export class Git extends EventEmitter implements GitEvents {
-  dirMap: (dir?: string) => string;
+  dirMap: (dir?: string) => string | Promise<string>;
 
   authenticate:
     | ((
         options: GitAuthenticateOptions,
-        callback: (error?: Error) => void | undefined
+        callback: (error?: Error) => Promise<void> | undefined
       ) => void | Promise<Error | undefined | void> | undefined)
     | undefined;
 
@@ -210,13 +210,13 @@ export class Git extends EventEmitter implements GitEvents {
    * Get a list of all the repositories
    * @param  {Function} callback function to be called when repositories have been found `function(error, repos)`
    */
-  list(callback: (error: Error | undefined, repos?: string[]) => void): void;
-  list(): Promise<string[]>;
-  list(
+  async list(callback: (error: Error | undefined, repos?: string[]) => void): Promise<string[] | void>;
+  async list(): Promise<string[]>;
+  async list(
     callback?: (error: Error | undefined, repos?: string[]) => void
-  ): Promise<string[]> | void {
-    const execf = (res: (repos: string[]) => void, rej: (err: Error) => void) =>
-      fs.readdir(this.dirMap(), (error, results) => {
+  ): Promise<string[] | void> {
+    const execf = async (res: (repos: string[]) => void, rej: (err: Error) => void) =>
+      fs.readdir(await this.dirMap(), (error, results) => {
         if (error) return rej(error);
         const repos = results.filter((r) => {
           return r.substring(r.length - 3, r.length) == 'git';
@@ -236,8 +236,8 @@ export class Git extends EventEmitter implements GitEvents {
    * @param  repo - name of the repo
    * @param  callback - function to be called when finished
    */
-  exists(repo: string): boolean {
-    return fs.existsSync(this.dirMap(repo));
+  async exists(repo: string): Promise<boolean> {
+    return fs.existsSync(await this.dirMap(repo));
   }
   /**
    * Create a subdirectory `dir` in the repo dir with a callback.
@@ -253,11 +253,11 @@ export class Git extends EventEmitter implements GitEvents {
    * @param  callback - Optionally get a callback `cb(err)` to be notified when the repository was created.
    */
   create(repo: string, callback: (error?: Error) => void) {
-    function next(self: Git) {
+    async function next(self: Git) {
       let ps;
       let _error = '';
 
-      const dir = self.dirMap(repo);
+      const dir = await self.dirMap(repo);
 
       if (self.checkout) {
         ps = spawn('git', ['init', dir]);
@@ -320,7 +320,7 @@ export class Git extends EventEmitter implements GitEvents {
     const self = this;
 
     const handlers = [
-      (req: http.IncomingMessage, res: http.ServerResponse) => {
+      async (req: http.IncomingMessage, res: http.ServerResponse) => {
         if (req.method !== 'GET') return false;
 
         // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -393,7 +393,7 @@ export class Git extends EventEmitter implements GitEvents {
           return next();
         }
       },
-      (req: http.IncomingMessage, res: http.ServerResponse) => {
+      async (req: http.IncomingMessage, res: http.ServerResponse) => {
         if (req.method !== 'GET') return false;
 
         const u = url.parse(req.url || '');
@@ -403,9 +403,9 @@ export class Git extends EventEmitter implements GitEvents {
 
         const repo = m[1];
 
-        const next = () => {
-          const file = this.dirMap(path.join(m[1], 'HEAD'));
-          const exists = this.exists(file);
+        const next = async () => {
+          const file = await this.dirMap(path.join(m[1], 'HEAD'));
+          const exists = await this.exists(file);
 
           if (exists) {
             fs.createReadStream(file).pipe(res);
@@ -415,12 +415,12 @@ export class Git extends EventEmitter implements GitEvents {
           }
         };
 
-        const exists = this.exists(repo);
+        const exists = await this.exists(repo);
         const anyListeners = self.listeners('head').length > 0;
         const dup = new HttpDuplex(req, res);
         dup.exists = exists;
         dup.repo = repo;
-        dup.cwd = this.dirMap(repo);
+        dup.cwd = await this.dirMap(repo);
 
         dup.accept = dup.emit.bind(dup, 'accept');
         dup.reject = dup.emit.bind(dup, 'reject');
@@ -446,7 +446,7 @@ export class Git extends EventEmitter implements GitEvents {
           if (!anyListeners) dup.accept();
         }
       },
-      (req: http.IncomingMessage, res: http.ServerResponse) => {
+      async (req: http.IncomingMessage, res: http.ServerResponse) => {
         if (req.method !== 'POST') return false;
         const m = req.url?.match(/\/(.+)\/git-(.+)/);
         if (!m) return false;
@@ -471,7 +471,7 @@ export class Git extends EventEmitter implements GitEvents {
           {
             repo: repo,
             service: service as ServiceString,
-            cwd: self.dirMap(repo),
+            cwd: await self.dirMap(repo),
           },
           req,
           res
@@ -486,7 +486,7 @@ export class Git extends EventEmitter implements GitEvents {
           }
         });
       },
-      (req: http.IncomingMessage, res: http.ServerResponse) => {
+      async (req: http.IncomingMessage, res: http.ServerResponse) => {
         if (req.method !== 'GET' && req.method !== 'POST') {
           res.statusCode = 405;
           res.end('method not supported');
@@ -494,16 +494,16 @@ export class Git extends EventEmitter implements GitEvents {
           return false;
         }
       },
-      (req: http.IncomingMessage, res: http.ServerResponse) => {
+      async (req: http.IncomingMessage, res: http.ServerResponse) => {
         res.statusCode = 404;
         res.end('not found');
       },
     ];
     res.setHeader('connection', 'close');
 
-    (function next(ix) {
-      const x = handlers[ix].call(self, req, res);
-      if (x === false) next(ix + 1);
+    (async function next(ix) {
+      const x = await handlers[ix].call(self, req, res) as boolean;
+      if (x === false) await next(ix + 1);
     })(0);
   }
   /**
@@ -520,16 +520,12 @@ export class Git extends EventEmitter implements GitEvents {
       options = { type: 'http' };
     }
 
-    const createServer =
-      options.type == 'http'
-        ? http.createServer
-        : https.createServer.bind(this, options);
 
-    this.server = createServer((req, res) => {
+    this.server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
       this.handle(req, res);
     });
 
-    this.server.listen(port, callback);
+    this.server.listen(port, '0.0.0.0', callback);
 
     return this;
   }

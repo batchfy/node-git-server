@@ -90,24 +90,24 @@ export function serviceRespond(
  * @param  req  - http request object
  * @param  res  - http response
  */
-export function infoResponse(
+export async function infoResponse(
   git: Git,
   repo: string,
   service: ServiceString,
   req: http.IncomingMessage,
   res: http.ServerResponse
 ) {
-  function next() {
+  async function next() {
     res.setHeader(
       'content-type',
       'application/x-git-' + service + '-advertisement'
     );
     noCache(res);
-    serviceRespond(git, service, git.dirMap(repo), res);
+    serviceRespond(git, service, await git.dirMap(repo), res);
   }
 
   const dup = new HttpDuplex(req, res);
-  dup.cwd = git.dirMap(repo);
+  dup.cwd = await git.dirMap(repo);
   dup.repo = repo;
 
   dup.accept = dup.emit.bind(dup, 'accept');
@@ -120,7 +120,7 @@ export function infoResponse(
 
   const anyListeners = git.listeners('info').length > 0;
 
-  const exists = git.exists(repo);
+  const exists = await git.exists(repo);
   dup.exists = exists;
 
   if (!exists && git.autoCreate) {
