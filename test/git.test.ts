@@ -36,7 +36,7 @@ describe("git", () => {
             .listen(port)
 
         repos.on("push", (push) => {
-            expect(push.repo).toBe("xyz/doom")
+            expect(push.repo).toBe("xyz/doom.git")
             expect(push.commit).toBe(lastCommit)
             expect(push.branch).toBe("main")
 
@@ -127,7 +127,7 @@ describe("git", () => {
         server.listen(port)
 
         repos.on("push", (push) => {
-            expect(push.repo).toBe("doom")
+            expect(push.repo).toBe("doom.git")
             push.accept()
         })
 
@@ -290,7 +290,7 @@ describe("git", () => {
         server.listen(port)
 
         repos.on("push", (push) => {
-            expect(push.repo).toBe("doom")
+            expect(push.repo).toBe("doom.git")
             expect(push.commit).toBe(lastCommit)
             expect(push.branch).toBe("main")
 
@@ -303,7 +303,7 @@ describe("git", () => {
 
         let firstTag = true
         repos.on("tag", (tag) => {
-            expect(tag.repo).toBe("doom")
+            expect(tag.repo).toBe("doom.git")
             expect(tag.version).toBe("0.0." + (firstTag ? 1 : 2))
 
             expect(tag.headers.host).toBe("localhost:" + port)
@@ -483,7 +483,7 @@ describe("git", () => {
         server.listen(port)
 
         repos.on("push", (push) => {
-            expect(push.repo).toBe("doom")
+            expect(push.repo).toBe("doom.git")
             expect(push.commit).toBe(lastCommit)
             expect(push.branch).toBe("main")
 

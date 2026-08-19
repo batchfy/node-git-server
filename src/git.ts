@@ -6,7 +6,7 @@ import { spawn } from "node:child_process"
 import { EventEmitter } from "node:events"
 
 import { HttpDuplex } from "./http-duplex.js"
-import { parseGitName, createAction, infoResponse, basicAuth, noCache } from "./util.js"
+import { parseGitName, createAction, infoResponse, basicAuth, noCache, pathExists, isRepoDir } from "./util.js"
 import type { ServiceString } from "./types.js"
 
 const services: ServiceString[] = ["upload-pack", "receive-pack"]
@@ -35,6 +35,7 @@ export interface GitOptions {
         callback: AuthenticateCallback
     ) => void | Promise<Error | undefined | void> | undefined
     checkout?: boolean
+    enforceGitSuffix?: boolean
 }
 
 export interface GitAuthenticateOptions {
@@ -155,6 +156,7 @@ export class Git extends EventEmitter implements GitEvents {
 
     autoCreate: boolean
     checkout: boolean | undefined
+    enforceGitSuffix: boolean
     server: https.Server | http.Server | undefined
 
     /**
@@ -164,6 +166,7 @@ export class Git extends EventEmitter implements GitEvents {
      * @param options.autoCreate - By default, repository targets will be created if they don't exist. You can disable that behavior with `options.autoCreate = false`
      * @param options.authenticate - a function that has the following arguments ({ type, repo, user, headers }, next) and will be called when a request comes through if set
      * @param options.checkout - If `opts.checkout` is true, create and expect checked-out repos instead of bare repos
+     * @param options.enforceGitSuffix - If true, `<name>.git` is the only name a repo is known by: requests for a suffix-less URL are redirected to the `.git` one, and `list()` only reports `.git` directories. Off by default, in which case both forms are served (see `canonicalRepoName`)
      */
     constructor(repoDir: string | RepoDirResolver, options: GitOptions = {}) {
         super()
@@ -180,6 +183,35 @@ export class Git extends EventEmitter implements GitEvents {
 
         this.autoCreate = options.autoCreate !== false
         this.checkout = options.checkout
+        this.enforceGitSuffix = options.enforceGitSuffix === true
+    }
+
+    /**
+     * The canonical on-disk name for `repo`, i.e. the name it gets when this server
+     * creates it. Bare repos (the default) are named `<name>.git`, checked-out repos
+     * (`options.checkout`) are named `<name>`, and `options.enforceGitSuffix` forces
+     * the `.git` suffix for both.
+     * @param repo - name of the repo, with or without a `.git` suffix
+     */
+    canonicalRepoName(repo: string): string {
+        if (this.enforceGitSuffix || !this.checkout) {
+            return repo.endsWith(".git") ? repo : repo + ".git"
+        }
+        return repo.endsWith(".git") ? repo.slice(0, -".git".length) : repo
+    }
+
+    /**
+     * Resolve the name a request refers to onto the name used for everything else
+     * (`dirMap`, `exists`, `create` and the emitted events), so that a repo is served
+     * under the same name it was created with. A repo that already exists under the
+     * requested name is served as-is; anything else falls back to `canonicalRepoName`.
+     * With `options.enforceGitSuffix` the canonical name is the only one accepted.
+     * @param repo - name of the repo, as it appeared in the request URL
+     */
+    async resolveRepo(repo: string): Promise<string> {
+        const canonical = this.canonicalRepoName(repo)
+        if (canonical === repo || this.enforceGitSuffix) return canonical
+        return (await pathExists(await this.dirMap(repo))) ? repo : canonical
     }
 
     /**
@@ -189,20 +221,26 @@ export class Git extends EventEmitter implements GitEvents {
     async list(callback: (error: Error | undefined, repos?: string[]) => void): Promise<void>
     async list(): Promise<string[]>
     async list(callback?: (error: Error | undefined, repos?: string[]) => void): Promise<string[] | void> {
-        const dir = await this.dirMap()
-        const execf = (res: (repos: string[]) => void, rej: (err: Error) => void) =>
-            fs.readdir(dir, (error, results) => {
-                if (error) return rej(error)
-                res(results.filter((r) => r.endsWith(".git")))
-            })
+        const find = async (): Promise<string[]> => {
+            const dir = await this.dirMap()
+            const entries = await fs.promises.readdir(dir, { withFileTypes: true })
+            const repos = await Promise.all(
+                entries.map(async (entry) => {
+                    if (!entry.isDirectory()) return undefined
+                    if (this.enforceGitSuffix && !entry.name.endsWith(".git")) return undefined
+                    return (await isRepoDir(path.join(dir, entry.name))) ? entry.name : undefined
+                })
+            )
+            return repos.filter((repo) => repo !== undefined)
+        }
 
         if (callback) {
-            return execf(
+            return find().then(
                 (repos) => callback(undefined, repos),
-                (err) => callback(err, undefined)
+                (error: Error) => callback(error, undefined)
             )
         }
-        return new Promise<string[]>((res, rej) => execf(res, rej))
+        return find()
     }
 
     /**
@@ -211,12 +249,7 @@ export class Git extends EventEmitter implements GitEvents {
      * @param repo - name of the repo
      */
     async exists(repo: string): Promise<boolean> {
-        try {
-            await fs.promises.access(await this.dirMap(repo))
-            return true
-        } catch {
-            return false
-        }
+        return pathExists(await this.dirMap(await this.resolveRepo(repo)))
     }
 
     /**
@@ -239,10 +272,8 @@ export class Git extends EventEmitter implements GitEvents {
             }
         }
 
-        if (!/\.git$/.test(repo)) repo += ".git"
-
         // `git init` creates the target directory (and any parent dirs) itself.
-        const dir = await this.dirMap(repo)
+        const dir = await this.dirMap(this.canonicalRepoName(repo))
         const ps = this.checkout ? spawn("git", ["init", dir]) : spawn("git", ["init", "--bare", dir])
 
         let error = ""
@@ -277,6 +308,25 @@ export class Git extends EventEmitter implements GitEvents {
     }
 
     /**
+     * With `options.enforceGitSuffix`, redirect a request for a suffix-less repo URL
+     * to the canonical `.git` one, so clients converge on a single name. Returns
+     * whether the request was answered with a redirect.
+     * @param repo - name of the repo as it appeared in the request URL
+     * @param url - the parsed request url
+     * @param res - http response
+     */
+    private redirectToCanonical(repo: string, url: URL, res: http.ServerResponse): boolean {
+        const canonical = this.canonicalRepoName(repo)
+        if (!this.enforceGitSuffix || canonical === repo) return false
+
+        // `url.pathname` is always `/<repo><rest>` for the routes that redirect.
+        res.statusCode = 301
+        res.setHeader("location", `/${canonical}${url.pathname.slice(repo.length + 1)}${url.search}`)
+        res.end()
+        return true
+    }
+
+    /**
      * Handle incoming HTTP requests with a connect-style middleware
      * @param req - http request object
      * @param res - http response object
@@ -286,7 +336,7 @@ export class Git extends EventEmitter implements GitEvents {
             (req: http.IncomingMessage, res: http.ServerResponse) => boolean | void | Promise<boolean | void>
         > = [
             // GET /:repo/info/refs
-            (req, res) => {
+            async (req, res) => {
                 if (req.method !== "GET") return false
 
                 const u = new URL(req.url ?? "", "http://localhost")
@@ -294,7 +344,9 @@ export class Git extends EventEmitter implements GitEvents {
                 if (!m) return false
                 if (/\.\./.test(m[1])) return false
 
-                const repo = m[1]
+                if (this.redirectToCanonical(m[1], u, res)) return
+
+                const repo = await this.resolveRepo(m[1])
                 const requestedService = u.searchParams.get("service")
                 if (!requestedService) {
                     res.statusCode = 400
@@ -310,7 +362,7 @@ export class Git extends EventEmitter implements GitEvents {
                     return
                 }
 
-                const repoName = parseGitName(m[1])
+                const repoName = parseGitName(repo)
                 const next = (error?: Error | void) => {
                     if (error) {
                         res.setHeader("Content-Type", "text/plain")
@@ -360,7 +412,9 @@ export class Git extends EventEmitter implements GitEvents {
                 if (!m) return false
                 if (/\.\./.test(m[1])) return false
 
-                const repo = m[1]
+                if (this.redirectToCanonical(m[1], u, res)) return
+
+                const repo = await this.resolveRepo(m[1])
 
                 const next = async () => {
                     const file = await this.dirMap(path.join(repo, "HEAD"))
@@ -412,7 +466,7 @@ export class Git extends EventEmitter implements GitEvents {
                 if (!m) return false
                 if (/\.\./.test(m[1])) return false
 
-                const repo = m[1]
+                const repo = await this.resolveRepo(m[1])
                 const service = m[2]
 
                 if (!services.includes(service as ServiceString)) {
