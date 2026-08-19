@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process"
+import fs from "node:fs/promises"
+import path from "node:path"
 import type * as http from "node:http"
 
 import type { Git } from "./git.js"
@@ -137,6 +139,32 @@ export async function infoResponse(
 
         if (!anyListeners) dup.accept()
     }
+}
+
+/**
+ * Whether `location` exists on disk.
+ * @param location - path to check
+ */
+export async function pathExists(location: string): Promise<boolean> {
+    try {
+        await fs.access(location)
+        return true
+    } catch {
+        return false
+    }
+}
+
+/**
+ * Whether `dir` holds a git repository — either a bare one (which has a `HEAD` file)
+ * or a checked-out one (which has a `.git` directory).
+ * @param dir - path of the directory to check
+ */
+export async function isRepoDir(dir: string): Promise<boolean> {
+    const [bare, checkedOut] = await Promise.all([
+        pathExists(path.join(dir, "HEAD")),
+        pathExists(path.join(dir, ".git")),
+    ])
+    return bare || checkedOut
 }
 
 /**

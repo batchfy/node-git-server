@@ -64,6 +64,31 @@ const repos = new Git(
 )
 ```
 
+## Repository names and the `.git` suffix
+
+A repo has one canonical on-disk name, and that is the name the server creates it
+under, reports from `list()`, passes to your `repoDir` resolver, and sets on the
+`repo` property of every event:
+
+- bare repos (the default) are named `<name>.git`
+- checked-out repos (`checkout: true`) are named `<name>`
+
+Requests may use either form: `git clone http://localhost:7005/doom` and
+`git clone http://localhost:7005/doom.git` both reach the same repository. A repo
+that already exists under the requested name wins, so repos on disk without a
+`.git` suffix keep working, and `list()` reports every directory that is a git
+repository rather than only the `.git`-suffixed ones.
+
+To insist on a single external name, set `enforceGitSuffix`:
+
+```js
+const repos = new Git(path.resolve("./repos"), { enforceGitSuffix: true })
+```
+
+With it, `<name>.git` is the only name a repo is known by: `GET` requests for a
+suffix-less URL are answered with a `301` to the `.git` URL (git follows it), and
+directories without the suffix are neither listed nor served.
+
 ## Documentation
 
 Full documentation is available at [https://batchfy.com/node-git-server](https://batchfy.com/node-git-server).
