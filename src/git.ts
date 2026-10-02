@@ -2,12 +2,16 @@ import fs from "node:fs"
 import path from "node:path"
 import http, { type ServerOptions } from "node:http"
 import https from "node:https"
-import { spawn } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { EventEmitter } from "node:events"
+import { promisify } from "node:util"
 
 import { HttpDuplex } from "./http-duplex.js"
 import { parseGitName, createAction, infoResponse, basicAuth, noCache } from "./util.js"
+import type { RefUpdate } from "./service.js"
 import type { ServiceString } from "./types.js"
+
+const execFileAsync = promisify(execFile)
 
 const services: ServiceString[] = ["upload-pack", "receive-pack"]
 
@@ -28,6 +32,13 @@ export type RepoDirResolver = (dir?: string) => string | Promise<string>
  */
 export type AuthenticateCallback = (error?: Error) => void | Promise<void>
 
+/**
+ * Runs once per `git push` (branches and tags alike) after the repo's refs have moved. The client
+ * is not kept waiting on it, so it may be slow. It is fail-tolerant: a throw or rejection only logs a
+ * warning — the push has already landed and the server keeps serving.
+ */
+export type AfterReceiveCallback = (data: ReceiveData) => void | Promise<void>
+
 export interface GitOptions {
     autoCreate?: boolean
     authenticate?: (
@@ -35,6 +46,7 @@ export interface GitOptions {
         callback: AuthenticateCallback
     ) => void | Promise<Error | undefined | void> | undefined
     checkout?: boolean
+    afterReceive?: AfterReceiveCallback
 }
 
 export interface GitAuthenticateOptions {
@@ -69,6 +81,12 @@ export interface PushData extends HttpDuplex {
 export interface FetchData extends HttpDuplex {
     repo: string // The string that defines the repo
     commit: string //  The string that defines the commit sha
+}
+
+/** What `afterReceive` is handed: the ref updates of one push that the repo now reflects. */
+export interface ReceiveData {
+    repo: string // The string that defines the repo
+    updates: RefUpdate[] // Never empty; a ref git declined (e.g. a non-fast-forward) is left out
 }
 
 /**
@@ -143,6 +161,27 @@ export interface GitEvents {
     on(event: "head", listener: (head: HeadData) => void): this
 }
 
+/**
+ * The subset of `updates` that the repo's refs now reflect. git-receive-pack exits 0 even when it
+ * declines a ref (a non-fast-forward under `receive.denyNonFastForwards`, a failing hook), so the
+ * refs are read back rather than trusting the request. Like git-receive-pack itself, a `dir` that
+ * does not exist is retried with a `.git` suffix (a push to `/doom` lands in `doom.git`).
+ */
+async function appliedUpdates(dir: string, updates: RefUpdate[]): Promise<RefUpdate[]> {
+    const cwd = await fs.promises.access(dir).then(
+        () => dir,
+        () => `${dir}.git`
+    )
+    const { stdout } = await execFileAsync("git", ["for-each-ref", "--format=%(objectname) %(refname)"], { cwd })
+    const refs = new Map(
+        stdout
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => line.split(" ").reverse() as [string, string])
+    )
+    return updates.filter((u) => (/^0+$/.test(u.commit) ? !refs.has(u.ref) : refs.get(u.ref) === u.commit))
+}
+
 export class Git extends EventEmitter implements GitEvents {
     dirMap: RepoDirResolver
 
@@ -155,6 +194,7 @@ export class Git extends EventEmitter implements GitEvents {
 
     autoCreate: boolean
     checkout: boolean | undefined
+    afterReceive: AfterReceiveCallback | undefined
     server: https.Server | http.Server | undefined
 
     /**
@@ -164,6 +204,7 @@ export class Git extends EventEmitter implements GitEvents {
      * @param options.autoCreate - By default, repository targets will be created if they don't exist. You can disable that behavior with `options.autoCreate = false`
      * @param options.authenticate - a function that has the following arguments ({ type, repo, user, headers }, next) and will be called when a request comes through if set
      * @param options.checkout - If `opts.checkout` is true, create and expect checked-out repos instead of bare repos
+     * @param options.afterReceive - an async callback run once per push after the refs have moved; see {@link AfterReceiveCallback}
      */
     constructor(repoDir: string | RepoDirResolver, options: GitOptions = {}) {
         super()
@@ -180,6 +221,7 @@ export class Git extends EventEmitter implements GitEvents {
 
         this.autoCreate = options.autoCreate !== false
         this.checkout = options.checkout
+        this.afterReceive = options.afterReceive
     }
 
     /**
@@ -442,6 +484,21 @@ export class Git extends EventEmitter implements GitEvents {
                         if (!anyListeners) action.accept()
                     }
                 })
+
+                // git-receive-pack only runs once the push is accepted, and its exit means the refs are final.
+                const afterReceive = this.afterReceive
+                if (afterReceive && service === "receive-pack") {
+                    action.once("exit", (code: number | null) => {
+                        if (code !== 0) return
+                        appliedUpdates(action.cwd, action.updates)
+                            .then(async (updates) => {
+                                if (updates.length > 0) await afterReceive({ repo: action.repo, updates })
+                            })
+                            .catch((error: unknown) =>
+                                console.warn(`[node-git-server] afterReceive failed for ${action.repo}:`, error)
+                            )
+                    })
+                }
             },
             // reject unsupported methods
             (req, res) => {

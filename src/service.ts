@@ -24,6 +24,16 @@ export interface ServiceOptions {
     service: ServiceString
 }
 
+/** One ref a `git push` asks to move. */
+export interface RefUpdate {
+    /** Full ref name, e.g. `refs/heads/main` or `refs/tags/v1`. */
+    ref: string
+    /** Sha before the push; all zeros when the push creates the ref. */
+    last: string
+    /** Sha after the push; all zeros when the push deletes the ref. */
+    commit: string
+}
+
 export class Service extends HttpDuplex {
     status: string
     override repo: string
@@ -32,6 +42,8 @@ export class Service extends HttpDuplex {
     logs: string[]
     last: string | undefined
     commit: string | undefined
+    /** Every ref update in the request, in order — `last`/`commit` only hold the final one. */
+    updates: RefUpdate[]
     evName: string | undefined
     username: string | undefined
 
@@ -51,6 +63,7 @@ export class Service extends HttpDuplex {
         this.service = opts.service
         this.cwd = opts.cwd
         this.logs = []
+        this.updates = []
 
         // buffers the request body until the service is accepted, then replays it to git
         const buffered = new PassThrough()
@@ -90,8 +103,11 @@ export class Service extends HttpDuplex {
                 if (!m) continue
 
                 if (this.service === "receive-pack") {
-                    this.last = m[1]
+                    // The greedy first group also swallows the line's 4-hex pkt-line length prefix
+                    // (m[3] is unset only for the bare "0000" flush alternative).
+                    this.last = m[3] ? m[1].slice(-m[2].length) : m[1]
                     this.commit = m[2]
+                    if (m[3]) this.updates.push({ ref: `refs/${m[3]}/${m[4]}`, last: this.last, commit: this.commit })
 
                     const type = m[3] === "heads" ? "branch" : "version"
                     this.evName = type === "branch" ? "push" : "tag"
@@ -159,7 +175,9 @@ export class Service extends HttpDuplex {
                 buffered.pipe(ps.stdin)
                 buffered.resume()
 
-                ps.on("exit", () => {
+                // `close`, not `exit`: `exit` can fire before git's stdout is drained, and the late output would
+                // then be pushed onto the already-ended response (ERR_STREAM_PUSH_AFTER_EOF).
+                ps.on("close", (code: number | null) => {
                     if (this.logs.length > 0) {
                         while (this.logs.length > 0) {
                             respStream.push(this.logs.pop())
@@ -168,7 +186,7 @@ export class Service extends HttpDuplex {
                     }
                     respStream.push(null)
 
-                    this.emit("exit")
+                    this.emit("exit", code)
                 })
             })
         })
