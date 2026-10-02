@@ -40,20 +40,20 @@ interface Fixture {
     bareDir: string
     srcDir: string
     calls: ReceiveData[]
-    /** Records a call and wakes `nextCall` — what the default `afterReceive` does; custom ones call it too. */
+    /** Records a call and wakes `nextCall` — what the default `postReceive` does; custom ones call it too. */
     record: (data: ReceiveData) => void
-    /** Resolves with the next `afterReceive` call (or the one already recorded at that index). */
+    /** Resolves with the next `postReceive` call (or the one already recorded at that index). */
     nextCall: () => Promise<ReceiveData>
     commit: (file: string, content: string) => Promise<string>
     close: () => Promise<void>
 }
 
 /**
- * A server with one bare repo "doom" and a local clone source dir. `afterReceive` defaults to
+ * A server with one bare repo "doom" and a local clone source dir. `postReceive` defaults to
  * recording each call; pass `options` to override it.
  */
 async function setup(options: GitOptions = {}): Promise<Fixture> {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ngs-after-receive-"))
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ngs-post-receive-"))
     const repoDir = path.join(root, "repos")
     const srcDir = path.join(root, "src")
     fs.mkdirSync(repoDir)
@@ -72,7 +72,7 @@ async function setup(options: GitOptions = {}): Promise<Fixture> {
         return new Promise<ReceiveData>((resolve) => waiters.push({ index, resolve }))
     }
 
-    const repos = new Git(repoDir, { afterReceive: record, ...options })
+    const repos = new Git(repoDir, { postReceive: record, ...options })
     await new Promise<void>((resolve, reject) => repos.create("doom", (err) => (err ? reject(err) : resolve())))
 
     const server = http.createServer((req, res) => repos.handle(req, res))
@@ -100,7 +100,7 @@ async function setup(options: GitOptions = {}): Promise<Fixture> {
     }
 }
 
-describe("afterReceive", () => {
+describe("postReceive", () => {
     let fx: Fixture | undefined
 
     afterEach(async () => {
@@ -111,7 +111,7 @@ describe("afterReceive", () => {
     test("a first push to a branch: called once with the created ref, after the bare repo already has it", async () => {
         let refAtCallTime: string | undefined
         const f = (fx = await setup({
-            afterReceive: async (data) => {
+            postReceive: async (data) => {
                 refAtCallTime = await git(f.bareDir, "rev-parse", "refs/heads/main")
                 f.record(data)
             },
@@ -248,7 +248,7 @@ describe("afterReceive", () => {
         const release = deferred()
         let finished = false
         const f = (fx = await setup({
-            afterReceive: async () => {
+            postReceive: async () => {
                 started.resolve()
                 await release.promise
                 finished = true
@@ -269,7 +269,7 @@ describe("afterReceive", () => {
         const boom = new Error("post-push work failed")
         let attempts = 0
         const f = (fx = await setup({
-            afterReceive: async (data) => {
+            postReceive: async (data) => {
                 attempts++
                 if (attempts === 1) throw boom
                 f.record(data)
@@ -297,7 +297,7 @@ describe("afterReceive", () => {
         const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
         const boom = new Error("sync failure")
         const f = (fx = await setup({
-            afterReceive: () => {
+            postReceive: () => {
                 throw boom
             },
         }))
@@ -316,7 +316,7 @@ describe("afterReceive", () => {
 
     test("a failing callback with no `error` listener does not crash the process", async () => {
         const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
-        const f = (fx = await setup({ afterReceive: () => Promise.reject(new Error("nobody listens")) }))
+        const f = (fx = await setup({ postReceive: () => Promise.reject(new Error("nobody listens")) }))
         expect(f.repos.listenerCount("error")).toBe(0)
         await f.commit("a.txt", "a")
 
@@ -364,8 +364,8 @@ describe("afterReceive", () => {
         })
     })
 
-    test("without afterReceive, pushes behave exactly as before", async () => {
-        const f = (fx = await setup({ afterReceive: undefined }))
+    test("without postReceive, pushes behave exactly as before", async () => {
+        const f = (fx = await setup({ postReceive: undefined }))
         const sha = await f.commit("a.txt", "a")
 
         expect(await gitCode(f.srcDir, "push", f.url, "main")).toBe(0)

@@ -33,11 +33,12 @@ export type RepoDirResolver = (dir?: string) => string | Promise<string>
 export type AuthenticateCallback = (error?: Error) => void | Promise<void>
 
 /**
- * Runs once per `git push` (branches and tags alike) after the repo's refs have moved. The client
- * is not kept waiting on it, so it may be slow. It is fail-tolerant: a throw or rejection only logs a
- * warning — the push has already landed and the server keeps serving.
+ * The in-process counterpart of git's `post-receive` hook: runs once per `git push` (branches and
+ * tags alike) after the repo's refs have moved, with the `(last, commit, ref)` updates it applied.
+ * The client is not kept waiting on it, so it may be slow. It is fail-tolerant: a throw or rejection
+ * only logs a warning — the push has already landed and the server keeps serving.
  */
-export type AfterReceiveCallback = (data: ReceiveData) => void | Promise<void>
+export type PostReceiveCallback = (data: ReceiveData) => void | Promise<void>
 
 export interface GitOptions {
     autoCreate?: boolean
@@ -46,7 +47,7 @@ export interface GitOptions {
         callback: AuthenticateCallback
     ) => void | Promise<Error | undefined | void> | undefined
     checkout?: boolean
-    afterReceive?: AfterReceiveCallback
+    postReceive?: PostReceiveCallback
 }
 
 export interface GitAuthenticateOptions {
@@ -83,7 +84,7 @@ export interface FetchData extends HttpDuplex {
     commit: string //  The string that defines the commit sha
 }
 
-/** What `afterReceive` is handed: the ref updates of one push that the repo now reflects. */
+/** What `postReceive` is handed: the ref updates of one push that the repo now reflects. */
 export interface ReceiveData {
     repo: string // The string that defines the repo
     updates: RefUpdate[] // Never empty; a ref git declined (e.g. a non-fast-forward) is left out
@@ -194,7 +195,7 @@ export class Git extends EventEmitter implements GitEvents {
 
     autoCreate: boolean
     checkout: boolean | undefined
-    afterReceive: AfterReceiveCallback | undefined
+    postReceive: PostReceiveCallback | undefined
     server: https.Server | http.Server | undefined
 
     /**
@@ -204,7 +205,7 @@ export class Git extends EventEmitter implements GitEvents {
      * @param options.autoCreate - By default, repository targets will be created if they don't exist. You can disable that behavior with `options.autoCreate = false`
      * @param options.authenticate - a function that has the following arguments ({ type, repo, user, headers }, next) and will be called when a request comes through if set
      * @param options.checkout - If `opts.checkout` is true, create and expect checked-out repos instead of bare repos
-     * @param options.afterReceive - an async callback run once per push after the refs have moved; see {@link AfterReceiveCallback}
+     * @param options.postReceive - an async callback run once per push after the refs have moved; see {@link PostReceiveCallback}
      */
     constructor(repoDir: string | RepoDirResolver, options: GitOptions = {}) {
         super()
@@ -221,7 +222,7 @@ export class Git extends EventEmitter implements GitEvents {
 
         this.autoCreate = options.autoCreate !== false
         this.checkout = options.checkout
-        this.afterReceive = options.afterReceive
+        this.postReceive = options.postReceive
     }
 
     /**
@@ -486,16 +487,16 @@ export class Git extends EventEmitter implements GitEvents {
                 })
 
                 // git-receive-pack only runs once the push is accepted, and its exit means the refs are final.
-                const afterReceive = this.afterReceive
-                if (afterReceive && service === "receive-pack") {
+                const postReceive = this.postReceive
+                if (postReceive && service === "receive-pack") {
                     action.once("exit", (code: number | null) => {
                         if (code !== 0) return
                         appliedUpdates(action.cwd, action.updates)
                             .then(async (updates) => {
-                                if (updates.length > 0) await afterReceive({ repo: action.repo, updates })
+                                if (updates.length > 0) await postReceive({ repo: action.repo, updates })
                             })
                             .catch((error: unknown) =>
-                                console.warn(`[node-git-server] afterReceive failed for ${action.repo}:`, error)
+                                console.warn(`[node-git-server] postReceive failed for ${action.repo}:`, error)
                             )
                     })
                 }

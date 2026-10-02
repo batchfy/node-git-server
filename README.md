@@ -65,14 +65,14 @@ const repos = new Git(
 ```
 
 `push` fires before git has received anything, so it can only accept or reject. For work that
-needs the pushed commits to be in the repo, pass `afterReceive`. It runs once per push (branches
+needs the pushed commits to be in the repo, pass `postReceive`. It runs once per push (branches
 and tags alike) after the refs have moved, with only the updates git actually applied. The client
 is not kept waiting on it, so it may be slow, and it is fail-tolerant: a throw or rejection only
 logs a warning.
 
 ```js
 const repos = new Git(path.resolve("./repos"), {
-    afterReceive: async ({ repo, updates }) => {
+    postReceive: async ({ repo, updates }) => {
         // updates: [{ ref: "refs/heads/main", last: "<sha before>", commit: "<sha after>" }, ...]
         // `last` is all zeros for a created ref, `commit` all zeros for a deleted one.
         await rebuildCaches(repo, updates)
