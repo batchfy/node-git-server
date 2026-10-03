@@ -64,6 +64,10 @@ const repos = new Git(
 )
 ```
 
+`push` and `tag` events also carry `update`, the full ref update the event is about —
+`{ ref: "refs/heads/main", last: "<sha before>", commit: "<sha after>" }` — the same shape
+`postReceive` receives.
+
 `push` fires before git has received anything, so it can only accept or reject. For work that
 needs the pushed commits to be in the repo, pass `postReceive`. It runs once per push (branches
 and tags alike) after the refs have moved, with only the updates git actually applied. The client

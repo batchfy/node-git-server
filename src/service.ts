@@ -42,7 +42,11 @@ export class Service extends HttpDuplex {
     logs: string[]
     last: string | undefined
     commit: string | undefined
-    /** Every ref update in the request, in order — `last`/`commit` only hold the final one. */
+    branch: string | undefined
+    version: string | undefined
+    /** The ref update the current `push`/`tag` event is about (the request's latest parsed one). */
+    update: RefUpdate | undefined
+    /** Every ref update in the request, in order — `update`/`last`/`commit` only hold the latest one. */
     updates: RefUpdate[]
     evName: string | undefined
     username: string | undefined
@@ -107,17 +111,19 @@ export class Service extends HttpDuplex {
                     // (m[3] is unset only for the bare "0000" flush alternative).
                     this.last = m[3] ? m[1].slice(-m[2].length) : m[1]
                     this.commit = m[2]
-                    if (m[3]) this.updates.push({ ref: `refs/${m[3]}/${m[4]}`, last: this.last, commit: this.commit })
+                    this.update = m[3]
+                        ? { ref: `refs/${m[3]}/${m[4]}`, last: this.last, commit: this.commit }
+                        : undefined
+                    if (this.update) this.updates.push(this.update)
 
-                    const type = m[3] === "heads" ? "branch" : "version"
-                    this.evName = type === "branch" ? "push" : "tag"
-
-                    const headers: Record<string, string> = {
-                        last: this.last,
-                        commit: this.commit,
+                    if (m[3] === "heads") {
+                        this.branch = m[4]
+                        this.evName = "push"
+                    } else {
+                        this.version = m[4]
+                        this.evName = "tag"
                     }
-                    headers[type] = (this as unknown as Record<string, string>)[type] = m[4]
-                    this.emit("header", headers)
+                    this.emit("header", this.update)
                 } else if (this.service === "upload-pack") {
                     this.commit = m[1]
                     this.evName = "fetch"

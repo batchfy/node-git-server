@@ -65,6 +65,7 @@ export interface TagData extends HttpDuplex {
     repo: string // The string that defines the repo
     commit: string // The string that defines the commit sha
     version: string // The string that defines the tag being pushed
+    update: RefUpdate // The full ref update: `refs/tags/<version>`, its old and new sha
 }
 
 /**
@@ -74,6 +75,7 @@ export interface PushData extends HttpDuplex {
     repo: string // The string that defines the repo
     commit: string // The string that defines the commit sha
     branch: string // The string that defines the branch
+    update: RefUpdate // The full ref update: `refs/heads/<branch>`, its old and new sha
 }
 
 /**

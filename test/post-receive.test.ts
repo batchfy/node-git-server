@@ -372,4 +372,205 @@ describe("postReceive", () => {
         expect(await git(f.bareDir, "rev-parse", "refs/heads/main")).toBe(sha)
         expect(f.calls).toHaveLength(0)
     })
+
+    describe("fires per ref movement, not per commit", () => {
+        test("one push carrying five commits on one branch: exactly one call, with only the before/after tips", async () => {
+            const f = (fx = await setup())
+            const base = await f.commit("base.txt", "base")
+            await git(f.srcDir, "push", f.url, "main")
+            await f.nextCall()
+
+            const shas: string[] = []
+            for (let i = 1; i <= 5; i++) shas.push(await f.commit(`c${i}.txt`, `commit ${i}`))
+            await git(f.srcDir, "push", f.url, "main")
+
+            expect(await f.nextCall()).toEqual({
+                repo: "doom",
+                updates: [{ ref: "refs/heads/main", last: base, commit: shas[4] }],
+            })
+            // The four intermediate commits are not reported anywhere.
+            for (const sha of shas.slice(0, 4)) {
+                expect(f.calls.flatMap((c) => c.updates).some((u) => u.commit === sha || u.last === sha)).toBe(false)
+            }
+            // A later push is the very next call — nothing else was queued for the five commits.
+            const after = await f.commit("after.txt", "after")
+            await git(f.srcDir, "push", f.url, "main")
+            expect((await f.nextCall()).updates).toEqual([{ ref: "refs/heads/main", last: shas[4], commit: after }])
+            expect(f.calls).toHaveLength(3)
+        })
+
+        test("a first push carrying a deep history (25 commits) is still one call", async () => {
+            const f = (fx = await setup())
+            let tip = ""
+            for (let i = 1; i <= 25; i++) tip = await f.commit(`deep${i}.txt`, `deep ${i}`)
+            await git(f.srcDir, "push", f.url, "main")
+
+            expect(await f.nextCall()).toEqual({
+                repo: "doom",
+                updates: [{ ref: "refs/heads/main", last: ZERO, commit: tip }],
+            })
+            const count = await git(f.bareDir, "rev-list", "--count", "refs/heads/main")
+            expect(count).toBe("25")
+            expect(f.calls).toHaveLength(1)
+        })
+
+        test("three pushes of one commit each: three calls, each chaining from the previous tip", async () => {
+            const f = (fx = await setup())
+            let last = ZERO
+            for (let i = 1; i <= 3; i++) {
+                const sha = await f.commit(`p${i}.txt`, `push ${i}`)
+                await git(f.srcDir, "push", f.url, "main")
+                expect(await f.nextCall()).toEqual({
+                    repo: "doom",
+                    updates: [{ ref: "refs/heads/main", last, commit: sha }],
+                })
+                last = sha
+            }
+            expect(f.calls).toHaveLength(3)
+        })
+
+        test("pushing an existing commit to a new branch (no new commits) still moves a ref: one call", async () => {
+            const f = (fx = await setup())
+            const sha = await f.commit("a.txt", "a")
+            await git(f.srcDir, "push", f.url, "main")
+            await f.nextCall()
+            const objectsBefore = await git(f.bareDir, "count-objects", "-v")
+
+            await git(f.srcDir, "push", f.url, "main:refs/heads/alias")
+
+            expect(await f.nextCall()).toEqual({
+                repo: "doom",
+                updates: [{ ref: "refs/heads/alias", last: ZERO, commit: sha }],
+            })
+            // No commit travelled: the object store is exactly what it was.
+            expect(await git(f.bareDir, "count-objects", "-v")).toBe(objectsBefore)
+            expect(f.calls).toHaveLength(2)
+        })
+
+        test("a push where git declines every ref moves nothing: no call at all", async () => {
+            const f = (fx = await setup())
+            const original = await f.commit("a.txt", "a")
+            await git(f.srcDir, "push", f.url, "main")
+            await f.nextCall()
+            await git(f.bareDir, "config", "receive.denyNonFastForwards", "true")
+
+            // Three rewritten commits in one force-push, all declined.
+            await git(f.srcDir, "commit", "--amend", "-m", "rewritten 1")
+            await f.commit("b.txt", "b")
+            await f.commit("c.txt", "c")
+            expect(await gitCode(f.srcDir, "push", "--force", f.url, "main")).not.toBe(0)
+            expect(await git(f.bareDir, "rev-parse", "refs/heads/main")).toBe(original)
+
+            // The declined push produced no call: the next call is this later push to a fresh branch.
+            await git(f.srcDir, "checkout", "-b", "fresh")
+            const fresh = await f.commit("d.txt", "d")
+            await git(f.srcDir, "push", f.url, "fresh")
+            expect(await f.nextCall()).toEqual({
+                repo: "doom",
+                updates: [{ ref: "refs/heads/fresh", last: ZERO, commit: fresh }],
+            })
+            expect(f.calls).toHaveLength(2)
+        })
+    })
+
+    describe("push/tag events carry the same RefUpdate", () => {
+        test("a first push: the push event's update is the created ref, and matches what postReceive gets", async () => {
+            const f = (fx = await setup())
+            const seen: Array<{ branch: string; commit: string; update: unknown }> = []
+            f.repos.on("push", (push) => {
+                seen.push({ branch: push.branch, commit: push.commit, update: { ...push.update } })
+                push.accept()
+            })
+            const sha = await f.commit("a.txt", "a")
+            await git(f.srcDir, "push", f.url, "main")
+
+            const call = await f.nextCall()
+            expect(seen).toEqual([
+                { branch: "main", commit: sha, update: { ref: "refs/heads/main", last: ZERO, commit: sha } },
+            ])
+            expect(call.updates).toEqual([seen[0].update])
+        })
+
+        test("a fast-forward: update.last is the previous tip, without the pkt-line length prefix", async () => {
+            const f = (fx = await setup())
+            const first = await f.commit("a.txt", "a")
+            await git(f.srcDir, "push", f.url, "main")
+            await f.nextCall()
+
+            const updates: unknown[] = []
+            f.repos.on("push", (push) => {
+                updates.push({ ...push.update })
+                push.accept()
+            })
+            const second = await f.commit("b.txt", "b")
+            await git(f.srcDir, "push", f.url, "main")
+            await f.nextCall()
+
+            expect(updates).toEqual([{ ref: "refs/heads/main", last: first, commit: second }])
+        })
+
+        test("a two-branch push: each push event sees its own ref's update, in request order", async () => {
+            const f = (fx = await setup())
+            const mainSha = await f.commit("a.txt", "a")
+            await git(f.srcDir, "checkout", "-b", "dev")
+            const devSha = await f.commit("b.txt", "b")
+
+            const seen: Array<{ branch: string; update: unknown }> = []
+            f.repos.on("push", (push) => {
+                seen.push({ branch: push.branch, update: { ...push.update } })
+                push.accept()
+            })
+            await git(f.srcDir, "push", f.url, "main", "dev")
+            const call = await f.nextCall()
+
+            const byBranch = Object.fromEntries(seen.map((e) => [e.branch, e.update]))
+            expect(byBranch).toEqual({
+                main: { ref: "refs/heads/main", last: ZERO, commit: mainSha },
+                dev: { ref: "refs/heads/dev", last: ZERO, commit: devSha },
+            })
+            // The events saw the updates in the same order postReceive lists them.
+            expect(seen.map((e) => e.update)).toEqual(call.updates)
+        })
+
+        test("a tag push: the tag event's update is under refs/tags, with version set as before", async () => {
+            const f = (fx = await setup())
+            const sha = await f.commit("a.txt", "a")
+            await git(f.srcDir, "push", f.url, "main")
+            await f.nextCall()
+
+            const seen: Array<{ version: string; update: unknown }> = []
+            f.repos.on("tag", (tag) => {
+                seen.push({ version: tag.version, update: { ...tag.update } })
+                tag.accept()
+            })
+            await git(f.srcDir, "tag", "v1")
+            await git(f.srcDir, "push", f.url, "v1")
+            await f.nextCall()
+
+            expect(seen).toEqual([{ version: "v1", update: { ref: "refs/tags/v1", last: ZERO, commit: sha } }])
+        })
+
+        test("a rejected push still exposed its update to the listener, and postReceive never runs", async () => {
+            const f = (fx = await setup())
+            const seen: unknown[] = []
+            let reject = true
+            f.repos.on("push", (push) => {
+                seen.push({ ...push.update })
+                if (reject) push.reject(403, "denied")
+                else push.accept()
+            })
+            const sha = await f.commit("a.txt", "a")
+
+            expect(await gitCode(f.srcDir, "push", f.url, "main")).not.toBe(0)
+            expect(seen).toEqual([{ ref: "refs/heads/main", last: ZERO, commit: sha }])
+
+            reject = false
+            await git(f.srcDir, "push", f.url, "main")
+            expect(await f.nextCall()).toEqual({
+                repo: "doom",
+                updates: [{ ref: "refs/heads/main", last: ZERO, commit: sha }],
+            })
+            expect(f.calls).toHaveLength(1)
+        })
+    })
 })
